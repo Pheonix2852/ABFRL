@@ -31,12 +31,15 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 
 # typescript
 *.tsbuildinfo
 
 app-example
+*.md
+abfrl-ad3e7-firebase-adminsdk-fbsvc-4728d7f8b4.json
 
 # generated native folders
 /ios

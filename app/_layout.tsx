@@ -1,24 +1,40 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
+import { Stack, useRouter } from "expo-router";
+import { useEffect } from "react";
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
-
-export const unstable_settings = {
-  anchor: '(tabs)',
-};
+import { AppErrorBoundary } from "@/components/AppErrorBoundary";
+import { useChatStore } from "@/store/chatStore";
+import { useOnboardingStore } from "@/store/onboardingStore";
+import { useReservationStore } from "@/store/reservationStore";
+import { useSessionStore } from "@/store/sessionStore";
+import { validateEnv } from "@/utils/validateEnv";
 
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
+  const router = useRouter();
+
+  useEffect(() => {
+    validateEnv();
+  }, []);
+
+  const handleAppReset = () => {
+    useSessionStore.getState().resetSession();
+    useOnboardingStore.getState().clearAnswers();
+    useChatStore.getState().clearChat();
+    useReservationStore.getState().clearReservation();
+    router.replace("/landing");
+  };
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+    <AppErrorBoundary onReset={handleAppReset}>
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="index" />
+        <Stack.Screen name="landing" />
+        <Stack.Screen name="onboarding" />
+        <Stack.Screen name="chat" />
+        <Stack.Screen name="recommendations" />
+        <Stack.Screen name="reservation-handoff" />
+        <Stack.Screen name="ready-state" />
+        <Stack.Screen name="checkout-placeholder" />
       </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+    </AppErrorBoundary>
   );
 }
