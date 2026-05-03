@@ -1,0 +1,6 @@
+{
+  "black": ["classic black", "jet black", "midnight black"],
+  "blue": ["navy", "royal blue", "sky blue"],
+  "cheap": ["budget", "affordable", "low price"],
+  "premium": ["luxury", "high-end"]
+}

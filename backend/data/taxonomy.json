@@ -1,0 +1,11 @@
+{
+  "kurtas": ["kurta", "kurti", "ethnic top"],
+  "shirts": ["shirt", "formal shirt", "casual shirt"],
+  "trousers": ["pant", "pants", "bottomwear", "slacks"],
+  "jeans": ["denim", "jean", "jeans"],
+  "dresses": ["dress", "gown", "one piece", "midi"],
+  "sarees": ["saree", "sari"],
+  "jackets": ["jacket", "blazer"],
+  "footwear": ["shoes", "sneakers", "loafer", "loafers", "sandals", "heels"],
+  "apparel": ["outfit", "outfits", "clothing", "clothes"]
+}
