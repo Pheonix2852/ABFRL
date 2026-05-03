@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from config import USE_NEW_TAXONOMY
 from models.search_models import SearchPlan
 from search.taxonomy import normalize_category, normalize_color
+from services import taxonomy_service
 
 
 def _unwrap_product(item: dict[str, Any]) -> dict[str, Any]:
@@ -25,16 +27,28 @@ def _price_from_product(product: dict[str, Any]) -> float:
     return _as_float(product.get("price"), 0.0)
 
 
-def _category_match(product: dict[str, Any], plan: SearchPlan) -> float:
-    if not plan.category:
+def _family_match(product: dict[str, Any], plan: SearchPlan) -> float:
+    requested = plan.subcategory
+    if not requested:
         return 0.5
 
-    product_category = normalize_category(product.get("subcategory") or product.get("category"))
+    product_subcategory = str(product.get("subcategory") or "").lower()
     product_name = str(product.get("name") or "").lower()
-    if product_category == plan.category:
+
+    if USE_NEW_TAXONOMY and taxonomy_service.is_family_match(product_subcategory, requested):
         return 1.0
-    if plan.category in product_name:
+
+    normalized_requested = str(requested).lower()
+    if normalized_requested in product_subcategory:
+        return 1.0
+    if normalized_requested in product_name:
         return 0.8
+
+    if plan.category:
+        product_category = normalize_category(product.get("subcategory") or product.get("category"))
+        if product_category == plan.category:
+            return 0.6
+
     return 0.0
 
 
@@ -103,18 +117,18 @@ def rank_products(products: list[dict[str, Any]], plan: SearchPlan) -> list[dict
     for item in products:
         product = _unwrap_product(item)
         semantic_similarity = _as_float(item.get("semantic_similarity", item.get("score", item.get("retrieval_score", 0.0))))
-        category_match = _category_match(product, plan)
+        family_match = _family_match(product, plan)
         budget_fit = _budget_fit(product, plan)
         color_match = _color_match(product, plan)
         occasion_match = _occasion_match(product, plan)
         rating = _rating(product)
 
         score = (
-            0.40 * semantic_similarity
-            + 0.20 * category_match
+            0.45 * family_match
+            + 0.20 * semantic_similarity
             + 0.15 * budget_fit
             + 0.10 * color_match
-            + 0.10 * occasion_match
+            + 0.05 * occasion_match
             + 0.05 * rating
         )
 
@@ -124,7 +138,7 @@ def rank_products(products: list[dict[str, Any]], plan: SearchPlan) -> list[dict
                 "product": product,
                 "rank_score": score,
                 "semantic_similarity": semantic_similarity,
-                "category_match": category_match,
+                "family_match": family_match,
                 "budget_fit": budget_fit,
                 "color_match": color_match,
                 "occasion_match": occasion_match,

@@ -5,9 +5,11 @@ from typing import Any
 
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue, Range
 
+from config import USE_NEW_TAXONOMY
 from models.search_models import SearchPlan
 from rag import vectorstore
 from rag.embedder import embed
+from services import taxonomy_service
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,10 @@ def _build_filter(plan: SearchPlan) -> Filter:
 
     # Filter by product subcategory field (e.g., "kurta", "pants") with alias expansion
     if plan.subcategory:
-        expanded = SUBCATEGORY_ALIAS_EXPANSION.get(plan.subcategory.lower(), [plan.subcategory])
+        if USE_NEW_TAXONOMY:
+            expanded = taxonomy_service.expand_aliases(plan.subcategory)
+        else:
+            expanded = SUBCATEGORY_ALIAS_EXPANSION.get(plan.subcategory.lower(), [plan.subcategory])
         if expanded:
             must.append(FieldCondition(key="subcategory", match=MatchAny(any=expanded)))
         else:
@@ -123,6 +128,9 @@ def _subcategory_match_score(product: dict[str, Any], plan: SearchPlan) -> float
         return 0.0
 
     product_subcategory = _safe_text(product.get("subcategory")).lower()
+    if USE_NEW_TAXONOMY:
+        return 1.0 if taxonomy_service.is_family_match(product_subcategory, requested) else 0.0
+
     allowed = {item.lower() for item in SUBCATEGORY_ALIAS_EXPANSION.get(requested, [requested])}
     return 1.0 if product_subcategory in allowed else 0.0
 
@@ -178,6 +186,7 @@ def retrieve_candidates(plan: SearchPlan, limit: int = 30) -> list[dict[str, Any
             top_k=max(limit * 2, 30),
             query_filter=query_filter,
         )
+        used_category_fallback = False
 
         candidates_before = len(results)
         logger.info("[search.retrieval] candidates_before_lexical=%d", candidates_before)
@@ -212,6 +221,7 @@ def retrieve_candidates(plan: SearchPlan, limit: int = 30) -> list[dict[str, Any
                 top_k=max(limit * 2, 30),
                 query_filter=fallback_filter,
             )
+            used_category_fallback = True
             candidates_before = len(results)
             logger.info("[search.retrieval] candidates_after_fallback=%d", candidates_before)
 
@@ -227,6 +237,7 @@ def retrieve_candidates(plan: SearchPlan, limit: int = 30) -> list[dict[str, Any
                     "semantic_similarity": semantic_similarity,
                     "lexical_bonus": lexical_bonus,
                     "retrieval_score": retrieval_score,
+                    "used_category_fallback": used_category_fallback,
                 }
             )
 
