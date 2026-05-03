@@ -26,7 +26,24 @@ import { displayValue } from "@/utils/displayValue";
 import { parseMessageSections } from "@/utils/messageParser";
 import { extractQueryContext } from "@/utils/queryContextExtractor";
 
-const QUICK_PROMPTS = ["Tell me more", "Different color", "Change budget"];
+const QUICK_PROMPTS = ["More", "Cheaper", "Different color", "Formal", "Casual"];
+
+function mapBackendErrorCode(raw: string): string {
+  const normalized = raw.trim().toUpperCase();
+  if (normalized === "NO_RESULTS") {
+    return "No exact match found. Try broader terms.";
+  }
+  if (normalized === "BUDGET_TOO_LOW") {
+    return "No products were found in that budget. Try increasing the budget slightly.";
+  }
+  if (normalized === "INTENT_UNCLEAR") {
+    return "I could not understand that request. Try specifying product type, budget, or color.";
+  }
+  if (normalized === "RETRIEVAL_FAILED" || normalized === "SERVICE_UNAVAILABLE") {
+    return "The shopping service is temporarily unavailable. Please try again.";
+  }
+  return raw;
+}
 
 function createMessageId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -55,6 +72,10 @@ export default function ChatScreen() {
   const addMessage = useChatStore((state) => state.addMessage);
   const clearChat = useChatStore((state) => state.clearChat);
   const setProducts = useChatStore((state) => state.setProducts);
+  const metadata = useChatStore((state) => state.metadata);
+  const setMetadata = useChatStore((state) => state.setMetadata);
+  const latestIntent = useChatStore((state) => state.latestIntent);
+  const setLatestIntent = useChatStore((state) => state.setLatestIntent);
   const products = useChatStore((state) => state.products);
 
   const profile = useUserProfileStore((state) => state.profile);
@@ -66,7 +87,6 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("Waking up the style engine...");
   const [retryPayload, setRetryPayload] = useState<string | null>(null);
-
   const hasMessages = messages.length > 0;
 
   const handleSend = useCallback(async (message: string, appendUserMessage = false) => {
@@ -116,11 +136,13 @@ export default function ChatScreen() {
       );
 
       if (response.error) {
-        throw new Error(response.error);
+        throw new Error(mapBackendErrorCode(response.error));
       }
 
       setSessionId(response.session_id);
       setProducts(response.products ?? []);
+      setMetadata(response.metadata ?? null);
+      setLatestIntent(response.intent);
 
       addMessage({
         id: createMessageId(),
@@ -139,6 +161,8 @@ export default function ChatScreen() {
     profile,
     sessionId,
     setActiveContext,
+    setLatestIntent,
+    setMetadata,
     setProducts,
     setSessionId,
   ]);
@@ -164,9 +188,11 @@ export default function ChatScreen() {
   ]);
 
   const showSuggestions = useMemo(
-    () => !loading && products.length === 0 && messages.some((item) => item.role === "assistant"),
-    [loading, messages, products.length],
+    () => !loading && latestIntent === "recommendation" && products.length > 0,
+    [latestIntent, loading, products.length],
   );
+
+  const ctaLabel = metadata?.cta || "View Recommendations";
 
   const onSendPress = () => {
     const draft = input;
@@ -191,6 +217,14 @@ export default function ChatScreen() {
       >
         <View style={styles.container}>
           <Header title="Stylist Chat" rightActionLabel="Reset" onRightAction={handleReset} />
+
+          {metadata?.loyalty_tier && typeof metadata.loyalty_discount_pct === "number" ? (
+            <View style={styles.loyaltyBanner}>
+              <Text style={styles.loyaltyText}>
+                {`${metadata.loyalty_tier.toUpperCase()} Member - ${metadata.loyalty_discount_pct}% Benefit Applied`}
+              </Text>
+            </View>
+          ) : null}
 
           {error ? (
             <View style={styles.errorWrap}>
@@ -243,7 +277,7 @@ export default function ChatScreen() {
                 onPress={() => router.push("/recommendations")}
                 style={styles.recommendationsButton}
               >
-                <Text style={styles.recommendationsButtonText}>View Recommendations</Text>
+                <Text style={styles.recommendationsButtonText}>{ctaLabel}</Text>
               </Pressable>
             ) : null}
           </ScrollView>
@@ -284,6 +318,21 @@ const styles = StyleSheet.create({
   },
   errorWrap: {
     marginBottom: 10,
+  },
+  loyaltyBanner: {
+    marginBottom: 10,
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: "#efe4cf",
+    borderWidth: 1,
+    borderColor: "#cfb78e",
+  },
+  loyaltyText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#4b3f2a",
   },
   messages: {
     flex: 1,

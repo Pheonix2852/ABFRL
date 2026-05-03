@@ -18,6 +18,8 @@ import { filterProductsByContext } from "@/utils/productValidator";
 export default function RecommendationsScreen() {
   const router = useRouter();
   const { products } = useChatStore();
+  const metadata = useChatStore((state) => state.metadata);
+  const latestIntent = useChatStore((state) => state.latestIntent);
   const setProducts = useChatStore((state) => state.setProducts);
   const sessionId = useSessionStore((state) => state.sessionId);
   const setReservation = useReservationStore((state) => state.setReservation);
@@ -34,7 +36,11 @@ export default function RecommendationsScreen() {
   );
 
   useEffect(() => {
-    const shouldRetry = valid.length === 0 && filtered.length > 0 && !autoRetrying;
+    const shouldRetry =
+      latestIntent === "recommendation" &&
+      valid.length === 0 &&
+      filtered.length > 0 &&
+      !autoRetrying;
     if (!shouldRetry || !profile) {
       return;
     }
@@ -62,6 +68,7 @@ export default function RecommendationsScreen() {
     activeContext,
     autoRetrying,
     filtered.length,
+    latestIntent,
     profile,
     sessionId,
     setProducts,
@@ -100,6 +107,14 @@ export default function RecommendationsScreen() {
     <ScreenWrapper>
       <Header title="Recommendations" showBack onBack={() => router.back()} />
 
+      {metadata?.loyalty_tier && typeof metadata.loyalty_discount_pct === "number" ? (
+        <View style={styles.loyaltyBanner}>
+          <Text style={styles.loyaltyText}>
+            {`${metadata.loyalty_tier.toUpperCase()} Member - ${metadata.loyalty_discount_pct}% Benefit Applied`}
+          </Text>
+        </View>
+      ) : null}
+
       {error ? <ErrorBanner message={error} /> : null}
 
       {valid.length === 0 ? (
@@ -135,6 +150,21 @@ const styles = StyleSheet.create({
   listWrap: {
     paddingTop: 10,
     paddingBottom: 24,
+  },
+  loyaltyBanner: {
+    marginTop: 10,
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: "#efe4cf",
+    borderWidth: 1,
+    borderColor: "#cfb78e",
+  },
+  loyaltyText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#4b3f2a",
   },
   emptyState: {
     marginTop: 20,

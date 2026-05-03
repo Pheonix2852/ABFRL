@@ -14,4 +14,5 @@ export interface Product {
   colors?: string[];
   sizes?: string[];
   occasion_tags?: string[];
+  availability_badge?: string;
 }

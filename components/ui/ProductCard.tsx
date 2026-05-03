@@ -12,6 +12,13 @@ type ProductCardProps = {
 export function ProductCard({ product, onReserve, reserving = false }: ProductCardProps) {
   const disabled = !product.in_stock || reserving;
   const imageUrl = displayValue(product.image_url);
+  const hasDiscount =
+    typeof product.discounted_price === "number" &&
+    product.discounted_price > 0 &&
+    product.discounted_price < product.price;
+  const savings = hasDiscount
+    ? Math.max(0, Number(product.price) - Number(product.discounted_price))
+    : 0;
 
   return (
     <View style={styles.card}>
@@ -33,10 +40,23 @@ export function ProductCard({ product, onReserve, reserving = false }: ProductCa
           </View>
         </View>
 
+        {product.availability_badge ? (
+          <View style={styles.availabilityPill}>
+            <Text style={styles.availabilityText}>{displayValue(product.availability_badge)}</Text>
+          </View>
+        ) : null}
+
         <View style={styles.priceLine}>
-          <Text style={styles.price}>Rs. {displayValue(product.price)}</Text>
-          {typeof product.discounted_price === "number" ? (
-            <Text style={styles.discountedPrice}>Rs. {displayValue(product.discounted_price)}</Text>
+          {hasDiscount ? (
+            <>
+              <Text style={styles.price}>Rs. {displayValue(product.discounted_price)}</Text>
+              <Text style={styles.originalPrice}>Rs. {displayValue(product.price)}</Text>
+            </>
+          ) : (
+            <Text style={styles.price}>Rs. {displayValue(product.price)}</Text>
+          )}
+          {hasDiscount && savings > 0 ? (
+            <Text style={styles.savingsBadge}>Save Rs. {displayValue(savings)}</Text>
           ) : null}
         </View>
 
@@ -116,6 +136,18 @@ const styles = StyleSheet.create({
   outStockText: {
     color: "#7c1f1f",
   },
+  availabilityPill: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: "#e7edf7",
+  },
+  availabilityText: {
+    color: "#21354a",
+    fontSize: 11,
+    fontWeight: "700",
+  },
   priceLine: {
     flexDirection: "row",
     alignItems: "center",
@@ -126,10 +158,21 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: "#0a7d4a",
   },
-  discountedPrice: {
+  originalPrice: {
     fontSize: 13,
     color: "#7f7f7f",
     textDecorationLine: "line-through",
+  },
+  savingsBadge: {
+    marginLeft: "auto",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: "#e4f7ea",
+    color: "#116b34",
+    fontSize: 11,
+    fontWeight: "800",
+    overflow: "hidden",
   },
   why: {
     color: "#2b3440",
