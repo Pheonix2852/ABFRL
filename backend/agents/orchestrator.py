@@ -7,10 +7,13 @@ import os
 import logging
 from groq import Groq
 
+from config import USE_NEW_LOYALTY, USE_NEW_TONE
 from agents import nlu_agent
 from agents import recommendation_agent
 from agents import inventory_agent
 from agents import loyalty_agent
+from services import loyalty_service, profile_service, tone_service
+from services import product_resolver
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 logger = logging.getLogger(__name__)
@@ -18,11 +21,15 @@ logger = logging.getLogger(__name__)
 CONTINUATION_SIGNALS = [
     "more",
     "show more",
-    "different",
+    "different color",
+    "different colours",
     "cheaper",
     "another",
     "else",
     "other options",
+    "blue",
+    "formal",
+    "casual",
 ]
 
 
@@ -54,15 +61,39 @@ def build_conversation_context(session: dict) -> str:
     return "\n".join(lines)
 
 
+import re
+
+
 def is_continuation(message: str, intent: str, entities: dict) -> bool:
-    lower = message.lower().strip()
-    is_short = len(lower.split()) <= 3
-    has_signal = any(s in lower for s in CONTINUATION_SIGNALS)
-    has_weak_intent = intent in ("fallback", "unclear", "")
-    has_no_context = not any(
+    """
+    Stricter continuation detection: only treat as continuation when the
+    message is short and contains an explicit follow-up phrase (whole-word
+    match). Do NOT merge when the message contains strong entity hints.
+    """
+    lower = (message or "").lower().strip()
+    # Avoid long messages being treated as follow-ups
+    if len(lower.split()) > 4:
+        return False
+
+    # Do whole-word/phrase matching to avoid accidental substring matches
+    has_signal = False
+    for s in CONTINUATION_SIGNALS:
+        pattern = r"\b" + re.escape(s) + r"\b"
+        if re.search(pattern, lower):
+            has_signal = True
+            break
+
+    if not has_signal:
+        return False
+
+    # If the user provided strong entity information, treat as a fresh query
+    has_strong_entity = any(
         entities.get(key) for key in ["category", "subcategory", "budget_max", "budget_min", "color", "occasion"]
     )
-    return (is_short and has_signal) or (has_weak_intent and has_signal and has_no_context)
+    if has_strong_entity:
+        return False
+
+    return True
 
 
 def run(message: str, user_id: str, session: dict) -> dict:
@@ -137,10 +168,16 @@ def run(message: str, user_id: str, session: dict) -> dict:
     logger.info("[orchestrator] Intent: %s", intent)
 
     # Step 3: Route based on intent
-    if intent == "greeting":
-        return _handle_greeting(user_id)
+    # Clear prior inventory search filters when moving into a fresh recommendation
+    # request to avoid carrying over store-specific constraints.
+    prior_intent = (session.get("last_resolved_intent") or {}).get("intent")
+    if prior_intent == "inventory_check" and intent == "recommendation":
+        session["last_resolved_intent"] = {}
 
-    elif intent == "recommendation":
+    if intent == "greeting":
+        return _handle_greeting(user_id, session)
+
+    if intent == "recommendation":
         result = _handle_recommendation(
             entities,
             user_id,
@@ -166,40 +203,52 @@ def run(message: str, user_id: str, session: dict) -> dict:
         ]
         return result
 
-    elif intent == "inventory_check":
-        return _handle_inventory_check(entities)
+    if intent == "inventory_check":
+        return _handle_inventory_check(entities, user_id=user_id, message=message)
 
-    elif intent == "loyalty_check":
+    if intent == "loyalty_check":
         return _handle_loyalty_check(user_id)
 
-    else:  # fallback
-        return _handle_fallback()
+    # fallback
+    return _handle_fallback()
 
 
-def _build_greeting_prompt(customer: dict, discount_info: dict) -> str:
-    name = customer.get("name", "there").split()[0]
-    tier = customer.get("loyaltyTier", "bronze").capitalize()
-    discount_label = discount_info.get("discount_label", "No discount")
-    points = customer.get("loyaltyPoints", 0)
+def _build_greeting_prompt(display_name: str, tier: str, discount_label: str, points: int = 0) -> str:
+    name = display_name.split()[0] if display_name and display_name != "Guest" else "there"
+    safe_tier = (tier or "bronze").capitalize()
 
     return (
         "You are a warm, personal style assistant for ABFRL, India's largest "
         "fashion retailer.\n"
-        f"You are speaking to {name}, a {tier} tier member.\n"
+        f"You are speaking to {name}, a {safe_tier} tier member.\n"
         f"Their current discount: {discount_label}.\n"
         f"They have {points} loyalty points.\n"
-        "Keep the welcome under 3 sentences. Address them by first name.\n"
-        "Suggest one specific thing they might like based on their tier and history."
+        "Keep the welcome under 2 sentences. Address them by first name when available.\n"
+        "Do not claim browsing history, past purchases, or personal facts that are not provided."
     )
 
 
-def _handle_greeting(user_id: str) -> dict:
+def _handle_greeting(user_id: str, session: dict) -> dict:
     """Handle greeting intent — return a friendly welcome."""
-    discount_result = loyalty_agent.run(user_id=user_id)
-    customer = loyalty_agent.find_customer(user_id)
+    display_name = profile_service.get_display_name(user_id, session)
 
-    if customer and customer.get("name"):
-        prompt = _build_greeting_prompt(customer, discount_result)
+    if USE_NEW_LOYALTY:
+        discount_result = loyalty_service.build_loyalty_payload(user_id)
+        tier = discount_result.get("tier", "bronze")
+        points = int(discount_result.get("loyalty_points", 0) or 0)
+    else:
+        discount_result = loyalty_agent.run(user_id=user_id)
+        customer = loyalty_agent.find_customer(user_id) or {}
+        tier = customer.get("loyaltyTier", discount_result.get("tier", "bronze"))
+        points = int(customer.get("loyaltyPoints", discount_result.get("loyalty_points", 0)) or 0)
+
+    if display_name != "Guest":
+        prompt = _build_greeting_prompt(
+            display_name=display_name,
+            tier=tier,
+            discount_label=discount_result.get("discount_label", "No discount"),
+            points=points,
+        )
         try:
             response = groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
@@ -209,14 +258,12 @@ def _handle_greeting(user_id: str) -> dict:
             )
             message = response.choices[0].message.content.strip()
         except Exception:
-            first_name = customer.get("name", "").split()[0]
-            message = f"Hey {first_name}! 👋 Welcome back to ABFRL."
+            message = tone_service.build_greeting_message(display_name, discount_result.get("discount_label"))
     else:
-        message = (
-            "Hello! 👋 Welcome to ABFRL Shopping Assistant. "
-            "I can help you find fashion recommendations, check inventory, "
-            "and apply loyalty discounts. What are you looking for today?"
-        )
+        message = tone_service.build_greeting_message(display_name, discount_result.get("discount_label"))
+
+    if USE_NEW_TONE:
+        message = tone_service.build_greeting_message(display_name, discount_result.get("discount_label"))
 
     return {
         "intent": "greeting",
@@ -224,7 +271,7 @@ def _handle_greeting(user_id: str) -> dict:
         "products": [],
         "discount_info": discount_result.get("discount_label", None),
         "metadata": {
-            "loyalty_tier": customer.get("loyaltyTier", "bronze") if customer else "bronze",
+            "loyalty_tier": tier,
             "loyalty_discount_pct": int(discount_result.get("discount_pct", 0) * 100),
         },
     }
@@ -243,11 +290,14 @@ def _handle_recommendation(
     """
     # Get loyalty/discount info first
     category = entities.get("category", "")
-    discount_info = loyalty_agent.run(
-        user_id=user_id,
-        cart_total=entities.get("budget_max", 0) or 0,
-        category=category,
-    )
+    if USE_NEW_LOYALTY:
+        discount_info = loyalty_service.build_loyalty_payload(user_id)
+    else:
+        discount_info = loyalty_agent.run(
+            user_id=user_id,
+            cart_total=entities.get("budget_max", 0) or 0,
+            category=category,
+        )
 
     # Run recommendation agent with entities + discount context
     rec_result = recommendation_agent.run(
@@ -260,7 +310,11 @@ def _handle_recommendation(
         context=context,
     )
 
-    customer = loyalty_agent.find_customer(user_id)
+    metadata_tier = discount_info.get("tier", "bronze")
+    if not USE_NEW_LOYALTY:
+        customer = loyalty_agent.find_customer(user_id)
+        if customer and customer.get("loyaltyTier"):
+            metadata_tier = customer.get("loyaltyTier")
 
     return {
         "intent": "recommendation",
@@ -268,43 +322,138 @@ def _handle_recommendation(
         "products": rec_result.get("products", []),
         "discount_info": discount_info.get("discount_label", None),
         "metadata": {
-            "loyalty_tier": customer.get("loyaltyTier", "bronze")
-            if customer
-            else "bronze",
+            "loyalty_tier": metadata_tier,
             "loyalty_discount_pct": int(discount_info.get("discount_pct", 0) * 100),
         },
     }
 
 
-def _handle_inventory_check(entities: dict) -> dict:
+def _build_inventory_product_card(
+    product: dict,
+    sku_id: str,
+    online_stock: int,
+    store_in_stock: bool,
+    store_label: str | None,
+    store_stock: int,
+) -> dict:
+    availability_badge = None
+    if store_label:
+        availability_badge = (
+            f"Available in {store_label.replace(' Store', '')} • {int(store_stock)} units"
+            if store_in_stock
+            else f"Out of stock in {store_label.replace(' Store', '')}"
+        )
+
+    return {
+        "id": str(product.get("id") or sku_id),
+        "name": str(product.get("name") or "Product"),
+        "category": str(product.get("category") or ""),
+        "subcategory": str(product.get("subcategory") or ""),
+        "gender_tags": list(product.get("gender_tags") or []),
+        "price": float(product.get("price") or 0),
+        "discounted_price": None,
+        "colors": list(product.get("colors") or []),
+        "occasion_tags": list(product.get("occasionTags") or product.get("occasion_tags") or []),
+        "sizes": list(product.get("sizes") or []),
+        "online_stock": int(online_stock),
+        "in_stock": bool(store_in_stock),
+        "image_url": str(product.get("image_url") or product.get("imageUrl") or ""),
+        "rating": float(product.get("rating") or 0),
+        "why_for_you": "",
+        "availability_badge": availability_badge,
+    }
+
+
+def _handle_inventory_check(entities: dict, user_id: str, message: str = "") -> dict:
     """Handle inventory check intent."""
     sku_id = entities.get("sku_id")
     store = entities.get("store", "online_warehouse")
+    resolved_product = None
+
+    if not sku_id:
+        resolved_product = product_resolver.resolve_product(
+            query=message,
+            subcategory=entities.get("subcategory"),
+        )
+        if resolved_product:
+            sku_id = resolved_product.get("sku_id")
 
     if not sku_id:
         return {
             "intent": "inventory_check",
             "message": (
                 "I'd love to check stock for you! "
-                "Please specify a product SKU (e.g. 'Is SKU_004 available?')."
+                "Please specify a product (e.g. 'Is Anarkali Kurta Set available in Bangalore?')."
             ),
             "products": [],
             "discount_info": None,
+            "metadata": None,
         }
 
     result = inventory_agent.run(sku_id=sku_id, store=store)
 
+    products = []
+    metadata = None
+    product_payload = None
+
+    if resolved_product and isinstance(resolved_product.get("product"), dict):
+        product_payload = resolved_product.get("product")
+    elif entities.get("sku_id"):
+        direct = product_resolver.resolve_product(query=str(entities.get("sku_id")))
+        if direct and isinstance(direct.get("product"), dict):
+            product_payload = direct.get("product")
+
+    # Build full rich product using recommendation pipeline helpers so the
+    # frontend receives identical product shapes as normal recommendations.
+    if product_payload:
+        # Get discount info for pricing
+        if USE_NEW_LOYALTY:
+            discount_info = loyalty_service.build_loyalty_payload(user_id)
+        else:
+            discount_info = loyalty_agent.run(user_id=user_id)
+
+        rich = recommendation_agent.build_rich_product(
+            product=product_payload,
+            entities=entities,
+            discount_info=discount_info,
+            online_stock=result.get("online_stock", 0),
+            in_stock=result.get("in_stock", False),
+        )
+
+        # Add availability badge on top of the rich product
+        availability_badge = None
+        store_label = result.get("store_label")
+        if store_label:
+            availability_badge = (
+                f"Available in {store_label.replace(' Store', '')} • {int(result.get('store_stock', 0))} units"
+                if result.get("in_stock")
+                else f"Out of stock in {store_label.replace(' Store', '')}"
+            )
+            rich["availability_badge"] = availability_badge
+
+        products = [rich]
+        metadata = {
+            "cta": "See Product",
+            "resolved_sku": sku_id,
+            "store": result.get("store"),
+            "store_label": result.get("store_label"),
+        }
+
     return {
         "intent": "inventory_check",
         "message": result.get("message", ""),
-        "products": [],
+        "products": products,
         "discount_info": None,
+        "metadata": metadata,
     }
 
 
 def _handle_loyalty_check(user_id: str) -> dict:
     """Handle loyalty check intent."""
-    result = loyalty_agent.run(user_id=user_id)
+    if USE_NEW_LOYALTY:
+        result = loyalty_service.build_loyalty_payload(user_id)
+    else:
+        result = loyalty_agent.run(user_id=user_id)
 
     # Build a rich message with coupon info
     message = result.get("message", "")

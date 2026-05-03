@@ -9,13 +9,14 @@ import logging
 from groq import Groq
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, Range
 
-from config import USE_NEW_SEARCH
+from config import USE_NEW_SEARCH, USE_NEW_TAXONOMY, USE_NEW_TONE
 from models.search_models import SearchPlan
 from search.normalizer import normalize_search_plan
 from search.planner import build_search_plan
 from search.query_memory import merge_with_previous_plan
 from search.ranking import rank_products
 from search.retrieval import retrieve_candidates
+from services import taxonomy_service, tone_service
 from rag.embedder import embed
 from rag import vectorstore
 from agents.inventory_agent import check_product_stock
@@ -335,7 +336,18 @@ def _run_structured_search(
     if previous_plan is not None:
         plan = merge_with_previous_plan(search_message, plan, previous_plan)
 
+    requested_family = None
+    if USE_NEW_TAXONOMY:
+        requested_family = taxonomy_service.detect_explicit_product_noun(search_message) or plan.subcategory
+        if requested_family and not plan.subcategory:
+            plan.subcategory = requested_family
+        if requested_family and not plan.category:
+            inferred_category = taxonomy_service.get_category_for_family(requested_family)
+            if inferred_category:
+                plan.category = inferred_category
+
     candidates = retrieve_candidates(plan)
+    used_category_fallback = any(item.get("used_category_fallback") for item in candidates)
     pipeline_counts = {
         "candidate_count_after_retrieval": len(candidates),
         "candidate_count_after_price": len(candidates),
@@ -347,13 +359,22 @@ def _run_structured_search(
     }
 
     if not candidates:
+        empty_message = "I couldn't find any matching products. Try different search terms!"
+        if USE_NEW_TONE:
+            empty_message = tone_service.build_recommendation_message(
+                count=0,
+                family=requested_family or plan.subcategory,
+                budget_max=plan.budget_max,
+                discount_label=discount_info.get("discount_label"),
+                used_fallback=False,
+            )
         logger.info(
             "[recommendation_agent] stage_counts=%s",
             pipeline_counts,
         )
         return {
             "products": [],
-            "message": "I couldn't find any matching products. Try different search terms!",
+            "message": empty_message,
             "error": None,
             "metadata": {
                 "search_plan": plan.model_dump() if hasattr(plan, "model_dump") else plan.dict(),
@@ -410,9 +431,18 @@ def _run_structured_search(
     )
 
     if not top_5:
+        empty_message = "I couldn't find any matching products. Try different search terms!"
+        if USE_NEW_TONE:
+            empty_message = tone_service.build_recommendation_message(
+                count=0,
+                family=requested_family or plan.subcategory,
+                budget_max=plan.budget_max,
+                discount_label=discount_info.get("discount_label"),
+                used_fallback=used_category_fallback,
+            )
         return {
             "products": [],
-            "message": "I couldn't find any matching products. Try different search terms!",
+            "message": empty_message,
             "error": None,
             "metadata": {
                 "search_plan": plan.model_dump() if hasattr(plan, "model_dump") else plan.dict(),
@@ -462,13 +492,22 @@ def _run_structured_search(
             }
         )
 
-    category_name = (_safe_text(
-        plan.category or entities.get("subcategory") or entities.get("category") or "fashion",
-        "fashion",
-    ) or "fashion").replace("_", " ")
-    message_text = f"Here are {len(products)} {category_name} picks perfect for you!"
-    if discount_label:
-        message_text += f" {discount_label} applied."
+    if USE_NEW_TONE:
+        message_text = tone_service.build_recommendation_message(
+            count=len(products),
+            family=requested_family or plan.subcategory or entities.get("subcategory") or entities.get("category"),
+            budget_max=plan.budget_max,
+            discount_label=discount_label,
+            used_fallback=used_category_fallback,
+        )
+    else:
+        category_name = (_safe_text(
+            plan.category or entities.get("subcategory") or entities.get("category") or "fashion",
+            "fashion",
+        ) or "fashion").replace("_", " ")
+        message_text = f"Here are {len(products)} {category_name} picks perfect for you!"
+        if discount_label:
+            message_text += f" {discount_label} applied."
 
     return {
         "products": products,
@@ -657,3 +696,48 @@ def run(
             "message": "Something went wrong while searching for products. Please try again.",
             "error": "RETRIEVAL_FAILED",
         }
+
+
+def build_rich_product(product: dict, entities: dict, discount_info: dict, online_stock: int = 0, in_stock: bool = True) -> dict:
+    """
+    Construct a full 'rich' product object consistent with recommendation responses.
+    This is used by other agents (e.g., orchestrator) when returning single
+    products such as inventory lookups so the frontend can render the exact
+    same Recommendation card.
+    """
+    price = product.get("price") or 0
+    discount_pct = discount_info.get("discount_pct", 0)
+    discount_label = discount_info.get("discount_label", "")
+
+    discounted_price = None
+    if discount_pct and discount_pct > 0:
+        try:
+            discounted_price = round(float(price) * (1 - float(discount_pct)), 2)
+        except Exception:
+            discounted_price = None
+
+    why = _generate_why_for_you(
+        product,
+        entities or {},
+        discount_label,
+        user_name=discount_info.get("customer_name", ""),
+        tier=discount_info.get("tier", ""),
+    )
+
+    return {
+        "id": _safe_text(product.get("id")),
+        "name": _safe_text(product.get("name")),
+        "category": _safe_text(product.get("category")),
+        "subcategory": _safe_text(product.get("subcategory")),
+        "gender_tags": _safe_list(product.get("gender_tags")),
+        "price": price,
+        "discounted_price": discounted_price,
+        "colors": _safe_list(product.get("colors")),
+        "occasion_tags": _safe_list(product.get("occasion_tags") or product.get("occasionTags")),
+        "sizes": _safe_list(product.get("sizes")),
+        "online_stock": int(online_stock or 0),
+        "in_stock": bool(in_stock),
+        "image_url": _safe_text(product.get("image_url") or product.get("imageUrl")),
+        "rating": product.get("rating", 0) or 0,
+        "why_for_you": why,
+    }

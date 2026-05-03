@@ -1,6 +1,7 @@
 {
   "black": ["classic black", "jet black", "midnight black"],
   "blue": ["navy", "royal blue", "sky blue"],
+  "red": ["maroon", "wine", "crimson", "coral", "burgundy", "rust"],
   "cheap": ["budget", "affordable", "low price"],
   "premium": ["luxury", "high-end"]
 }
