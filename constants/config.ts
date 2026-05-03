@@ -1,5 +1,6 @@
 export const BACKEND_BASE_URL =
-  process.env.EXPO_PUBLIC_BACKEND_BASE_URL ?? "https://final-yr-proj.onrender.com";
+  process.env.EXPO_PUBLIC_BACKEND_URL ??
+  "https://final-yr-proj.onrender.com";
 
 export const CHAT_ENDPOINT = `${BACKEND_BASE_URL}/chat`;
 

@@ -11,6 +11,9 @@ export interface ChatResponse {
   message: string;
   intent: string;
   products?: Product[];
-  metadata?: Record<string, unknown>;
-  error?: string;
+  metadata?: {
+    loyalty_tier: "bronze" | "silver" | "gold" | "platinum";
+    loyalty_discount_pct: number;
+  } | null;
+  error?: string | null;
 }
