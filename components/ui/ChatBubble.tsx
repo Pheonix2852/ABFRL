@@ -1,21 +1,58 @@
 import { StyleSheet, Text, View } from "react-native";
 
+import { SuggestionChips } from "@/components/ui/SuggestionChips";
+import { displayValue } from "@/utils/displayValue";
+import type { MessageSection } from "@/utils/messageParser";
+
 type ChatBubbleProps = {
   text: string;
   role: "user" | "assistant";
   timestamp?: string;
+  sections?: MessageSection[];
+  onSuggestionSelect?: (chip: string) => void;
 };
 
-export function ChatBubble({ text, role, timestamp }: ChatBubbleProps) {
+export function ChatBubble({
+  text,
+  role,
+  timestamp,
+  sections,
+  onSuggestionSelect,
+}: ChatBubbleProps) {
   const isUser = role === "user";
+  const resolvedSections = sections ?? [{ type: "plain", text }];
 
   return (
     <View style={[styles.row, isUser ? styles.rowUser : styles.rowAssistant]}>
       <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant]}>
-        <Text style={[styles.text, isUser ? styles.textUser : styles.textAssistant]}>{text}</Text>
+        {resolvedSections.map((section, index) => {
+          if (section.type === "suggestion_chips") {
+            return (
+              <SuggestionChips
+                key={`chips-${index}`}
+                chips={section.chips}
+                onSelect={(chip) => onSuggestionSelect?.(chip)}
+              />
+            );
+          }
+
+          const isGreeting = section.type === "greeting";
+          return (
+            <Text
+              key={`${section.type}-${index}`}
+              style={[
+                styles.text,
+                isUser ? styles.textUser : styles.textAssistant,
+                isGreeting ? styles.greetingText : null,
+              ]}
+            >
+              {displayValue(section.text)}
+            </Text>
+          );
+        })}
         {timestamp ? (
           <Text style={[styles.timestamp, isUser ? styles.textUser : styles.textAssistant]}>
-            {timestamp}
+            {displayValue(timestamp)}
           </Text>
         ) : null}
       </View>
@@ -57,6 +94,11 @@ const styles = StyleSheet.create({
   },
   textAssistant: {
     color: "#1e2329",
+  },
+  greetingText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#2f3b46",
   },
   timestamp: {
     marginTop: 6,

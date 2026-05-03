@@ -1,6 +1,8 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { displayValue } from "@/utils/displayValue";
+
 type HeaderProps = {
   title: string;
   showBack?: boolean;
@@ -24,12 +26,12 @@ export function Header({
             <Ionicons name="chevron-back" size={20} color="#13293d" />
           </Pressable>
         ) : null}
-        <Text style={styles.title}>{title}</Text>
+        <Text style={styles.title}>{displayValue(title)}</Text>
       </View>
 
       {rightActionLabel && onRightAction ? (
         <Pressable onPress={onRightAction} style={styles.rightAction}>
-          <Text style={styles.rightActionText}>{rightActionLabel}</Text>
+          <Text style={styles.rightActionText}>{displayValue(rightActionLabel)}</Text>
         </Pressable>
       ) : (
         <View style={styles.rightActionPlaceholder} />

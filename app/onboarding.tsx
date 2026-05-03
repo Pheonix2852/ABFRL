@@ -5,6 +5,7 @@ import { useRouter } from "expo-router";
 import { Header } from "@/components/layout/Header";
 import { ScreenWrapper } from "@/components/layout/ScreenWrapper";
 import { useOnboardingStore } from "@/store/onboardingStore";
+import { useUserProfileStore } from "@/store/userProfileStore";
 import type { BudgetRange, OccasionType } from "@/types/onboarding";
 
 const BUDGET_OPTIONS: BudgetRange[] = [
@@ -24,6 +25,8 @@ const OCCASION_OPTIONS: { label: string; value: OccasionType }[] = [
 export default function OnboardingScreen() {
   const router = useRouter();
   const { setAnswers, setInitialPrompt } = useOnboardingStore();
+  const profile = useUserProfileStore((state) => state.profile);
+  const updateProfile = useUserProfileStore((state) => state.updateProfile);
 
   const [step, setStep] = useState(0);
   const [selectedBudget, setSelectedBudget] = useState<BudgetRange | null>(null);
@@ -70,8 +73,14 @@ export default function OnboardingScreen() {
 
     setAnswers(answers);
 
-    const firstPrompt = `I am looking for ${selectedOccasion} outfits in ${selectedColors.join(", ")}, budget ${selectedBudget.label}`;
+    const colors = selectedColors.join(", ") || "any color";
+    const budget = selectedBudget ? `under Rs.${selectedBudget.max}` : "";
+    const occasionLabel = selectedOccasion ?? "any occasion";
+    const name = profile?.display_name ?? "Guest";
+    const firstPrompt = `Hi! I'm ${name}. I like ${colors} outfits for ${occasionLabel} ${budget}. Can you suggest something?`;
     setInitialPrompt(firstPrompt);
+
+    updateProfile({ is_profile_complete: true });
 
     router.push("/chat");
   };

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
@@ -6,28 +6,79 @@ import { Header } from "@/components/layout/Header";
 import { ScreenWrapper } from "@/components/layout/ScreenWrapper";
 import { ErrorBanner } from "@/components/ui/ErrorBanner";
 import { ProductCard } from "@/components/ui/ProductCard";
-import { DEV_USER_ID } from "@/constants/config";
+import { buildAugmentedMessage, sendChatMessageWithRetry } from "@/services/chatApi";
 import { createReservation } from "@/services/reservationApi";
+import { useActiveQueryStore } from "@/store/activeQueryStore";
 import { useChatStore } from "@/store/chatStore";
 import { useReservationStore } from "@/store/reservationStore";
 import { useSessionStore } from "@/store/sessionStore";
+import { useUserProfileStore } from "@/store/userProfileStore";
+import { filterProductsByContext } from "@/utils/productValidator";
 
 export default function RecommendationsScreen() {
   const router = useRouter();
   const { products } = useChatStore();
+  const setProducts = useChatStore((state) => state.setProducts);
   const sessionId = useSessionStore((state) => state.sessionId);
   const setReservation = useReservationStore((state) => state.setReservation);
+  const profile = useUserProfileStore((state) => state.profile);
+  const activeContext = useActiveQueryStore((state) => state.context);
 
   const [error, setError] = useState<string | null>(null);
   const [pendingProductId, setPendingProductId] = useState<string | null>(null);
+  const [autoRetrying, setAutoRetrying] = useState(false);
+
+  const { valid, filtered } = useMemo(
+    () => filterProductsByContext(products, activeContext),
+    [activeContext, products],
+  );
+
+  useEffect(() => {
+    const shouldRetry = valid.length === 0 && filtered.length > 0 && !autoRetrying;
+    if (!shouldRetry || !profile) {
+      return;
+    }
+
+    const retryMessage = buildAugmentedMessage("More", activeContext);
+    setAutoRetrying(true);
+
+    void sendChatMessageWithRetry({
+      message: retryMessage,
+      user_id: profile.user_id,
+      session_id: sessionId,
+    })
+      .then((response) => {
+        setProducts(response.products ?? []);
+      })
+      .catch((retryError) => {
+        setError(
+          retryError instanceof Error
+            ? retryError.message
+            : "Unable to refresh recommendations.",
+        );
+      })
+      .finally(() => setAutoRetrying(false));
+  }, [
+    activeContext,
+    autoRetrying,
+    filtered.length,
+    profile,
+    sessionId,
+    setProducts,
+    valid.length,
+  ]);
 
   const handleReserve = async (productId: string) => {
     setError(null);
     setPendingProductId(productId);
 
     try {
+      if (!profile) {
+        throw new Error("Profile not ready. Please try again.");
+      }
+
       const reservation = await createReservation({
-        user_id: DEV_USER_ID,
+        user_id: profile.user_id,
         product_id: productId,
         session_id: sessionId ?? undefined,
       });
@@ -51,7 +102,7 @@ export default function RecommendationsScreen() {
 
       {error ? <ErrorBanner message={error} /> : null}
 
-      {products.length === 0 ? (
+      {valid.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyTitle}>No products yet</Text>
           <Text style={styles.emptyCopy}>
@@ -60,7 +111,7 @@ export default function RecommendationsScreen() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.listWrap}>
-          {products.map((product) => (
+          {valid.map((product) => (
             <ProductCard
               key={product.id}
               product={product}

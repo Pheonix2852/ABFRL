@@ -1,6 +1,8 @@
 import QRCode from "react-native-qrcode-svg";
 import { StyleSheet, Text, View } from "react-native";
 
+import { displayValue } from "@/utils/displayValue";
+
 type ReservationQRProps = {
   qrPayload: string;
   reservationId: string;
@@ -13,7 +15,7 @@ export function ReservationQR({ qrPayload, reservationId }: ReservationQRProps) 
       <View style={styles.qrWrap}>
         <QRCode value={qrPayload} size={210} />
       </View>
-      <Text style={styles.id}>ID: {reservationId}</Text>
+      <Text style={styles.id}>ID: {displayValue(reservationId)}</Text>
       <Text style={styles.helper}>Scan at store entrance</Text>
     </View>
   );

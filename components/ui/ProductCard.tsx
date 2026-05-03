@@ -1,5 +1,6 @@
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 
+import { displayValue } from "@/utils/displayValue";
 import type { Product } from "@/types/product";
 
 type ProductCardProps = {
@@ -10,11 +11,12 @@ type ProductCardProps = {
 
 export function ProductCard({ product, onReserve, reserving = false }: ProductCardProps) {
   const disabled = !product.in_stock || reserving;
+  const imageUrl = displayValue(product.image_url);
 
   return (
     <View style={styles.card}>
-      {product.image_url ? (
-        <Image source={{ uri: product.image_url }} style={styles.image} resizeMode="cover" />
+      {imageUrl ? (
+        <Image source={{ uri: imageUrl }} style={styles.image} resizeMode="cover" />
       ) : (
         <View style={[styles.image, styles.imageFallback]}>
           <Text style={styles.imageFallbackText}>No image</Text>
@@ -23,7 +25,7 @@ export function ProductCard({ product, onReserve, reserving = false }: ProductCa
 
       <View style={styles.body}>
         <View style={styles.topLine}>
-          <Text style={styles.name}>{product.name}</Text>
+          <Text style={styles.name}>{displayValue(product.name)}</Text>
           <View style={[styles.stockBadge, product.in_stock ? styles.inStock : styles.outStock]}>
             <Text style={[styles.stockText, product.in_stock ? styles.inStockText : styles.outStockText]}>
               {product.in_stock ? "In stock" : "Out of stock"}
@@ -32,13 +34,13 @@ export function ProductCard({ product, onReserve, reserving = false }: ProductCa
         </View>
 
         <View style={styles.priceLine}>
-          <Text style={styles.price}>Rs. {product.price}</Text>
+          <Text style={styles.price}>Rs. {displayValue(product.price)}</Text>
           {typeof product.discounted_price === "number" ? (
-            <Text style={styles.discountedPrice}>Rs. {product.discounted_price}</Text>
+            <Text style={styles.discountedPrice}>Rs. {displayValue(product.discounted_price)}</Text>
           ) : null}
         </View>
 
-        {product.why_for_you ? <Text style={styles.why}>Why for you: {product.why_for_you}</Text> : null}
+        {product.why_for_you ? <Text style={styles.why}>Why for you: {displayValue(product.why_for_you)}</Text> : null}
 
         <Pressable
           onPress={() => onReserve(product.id)}

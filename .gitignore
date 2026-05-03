@@ -38,9 +38,10 @@ yarn-error.*
 *.tsbuildinfo
 
 app-example
-*.md
-abfrl-ad3e7-firebase-adminsdk-fbsvc-4728d7f8b4.json
+CHECKPOINT.md
 
 # generated native folders
 /ios
 /android
+graphify-out
+graphify-out-merged

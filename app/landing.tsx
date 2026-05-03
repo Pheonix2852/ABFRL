@@ -5,14 +5,17 @@ import { useRouter } from "expo-router";
 import { Header } from "@/components/layout/Header";
 import { ScreenWrapper } from "@/components/layout/ScreenWrapper";
 import { getActiveFestiveEvent } from "@/constants/festiveCalendar";
+import { useUserProfileStore } from "@/store/userProfileStore";
 
 export default function LandingScreen() {
   const router = useRouter();
   const activeEvent = useMemo(() => getActiveFestiveEvent(), []);
+  const profile = useUserProfileStore((state) => state.profile);
+  const name = profile?.display_name ? profile.display_name.split(" ")[0] : "";
 
   return (
     <ScreenWrapper>
-      <Header title="ABFRL Stylist" />
+      <Header title={name ? `Welcome, ${name}` : "ABFRL Stylist"} />
 
       <View style={styles.hero}>
         <View style={styles.badgeRow}>

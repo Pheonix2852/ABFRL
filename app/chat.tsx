@@ -16,11 +16,15 @@ import { Header } from "@/components/layout/Header";
 import { ScreenWrapper } from "@/components/layout/ScreenWrapper";
 import { ChatBubble } from "@/components/ui/ChatBubble";
 import { ErrorBanner } from "@/components/ui/ErrorBanner";
-import { DEV_USER_ID } from "@/constants/config";
-import { sendChatMessage } from "@/services/chatApi";
+import { buildAugmentedMessage, sendChatMessageWithRetry } from "@/services/chatApi";
+import { useActiveQueryStore } from "@/store/activeQueryStore";
 import { useChatStore } from "@/store/chatStore";
 import { useOnboardingStore } from "@/store/onboardingStore";
 import { useSessionStore } from "@/store/sessionStore";
+import { useUserProfileStore } from "@/store/userProfileStore";
+import { displayValue } from "@/utils/displayValue";
+import { parseMessageSections } from "@/utils/messageParser";
+import { extractQueryContext } from "@/utils/queryContextExtractor";
 
 const QUICK_PROMPTS = ["Tell me more", "Different color", "Change budget"];
 
@@ -53,9 +57,14 @@ export default function ChatScreen() {
   const setProducts = useChatStore((state) => state.setProducts);
   const products = useChatStore((state) => state.products);
 
+  const profile = useUserProfileStore((state) => state.profile);
+  const activeContext = useActiveQueryStore((state) => state.context);
+  const setActiveContext = useActiveQueryStore((state) => state.setContext);
+
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState("Waking up the style engine...");
   const [retryPayload, setRetryPayload] = useState<string | null>(null);
 
   const hasMessages = messages.length > 0;
@@ -66,6 +75,16 @@ export default function ChatScreen() {
     if (!trimmed) {
       return;
     }
+
+    if (!profile) {
+      setError("Profile not ready yet. Please try again.");
+      return;
+    }
+
+    const extracted = extractQueryContext(trimmed);
+    setActiveContext(extracted);
+    const mergedContext = { ...activeContext, ...extracted };
+    const finalMessage = buildAugmentedMessage(trimmed, mergedContext);
 
     if (appendUserMessage) {
       addMessage({
@@ -79,13 +98,22 @@ export default function ChatScreen() {
     setLoading(true);
     setError(null);
     setRetryPayload(trimmed);
+    setLoadingMessage("Waking up the style engine...");
 
     try {
-      const response = await sendChatMessage({
-        message: trimmed,
-        user_id: DEV_USER_ID,
-        session_id: sessionId,
-      });
+      const response = await sendChatMessageWithRetry(
+        {
+          message: finalMessage,
+          user_id: profile.user_id,
+          session_id: sessionId,
+        },
+        0,
+        (attempt) => {
+          if (attempt > 0) {
+            setLoadingMessage("Still working on it...");
+          }
+        },
+      );
 
       if (response.error) {
         throw new Error(response.error);
@@ -97,7 +125,7 @@ export default function ChatScreen() {
       addMessage({
         id: createMessageId(),
         role: "assistant",
-        text: response.message,
+        text: displayValue(response.message),
         timestamp: nowTimeLabel(),
       });
     } catch (chatError) {
@@ -105,7 +133,15 @@ export default function ChatScreen() {
     } finally {
       setLoading(false);
     }
-  }, [addMessage, sessionId, setProducts, setSessionId]);
+  }, [
+    activeContext,
+    addMessage,
+    profile,
+    sessionId,
+    setActiveContext,
+    setProducts,
+    setSessionId,
+  ]);
 
   useEffect(() => {
     if (!answers && !hasMessages && !initialPrompt) {
@@ -171,6 +207,12 @@ export default function ChatScreen() {
                 key={message.id}
                 role={message.role}
                 text={message.text}
+                sections={
+                  message.role === "assistant"
+                    ? parseMessageSections(message.text)
+                    : undefined
+                }
+                onSuggestionSelect={(chip) => void handleSend(chip, true)}
                 timestamp={message.timestamp}
               />
             ))}
@@ -178,7 +220,7 @@ export default function ChatScreen() {
             {loading ? (
               <View style={styles.loaderRow}>
                 <ActivityIndicator color="#13293d" />
-                <Text style={styles.loaderText}>Stylist is thinking...</Text>
+                <Text style={styles.loaderText}>{loadingMessage}</Text>
               </View>
             ) : null}
 

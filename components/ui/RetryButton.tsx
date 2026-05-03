@@ -1,5 +1,7 @@
 import { Pressable, StyleSheet, Text } from "react-native";
 
+import { displayValue } from "@/utils/displayValue";
+
 type RetryButtonProps = {
   onPress: () => void;
   label?: string;
@@ -17,7 +19,7 @@ export function RetryButton({ onPress, label = "Retry", disabled }: RetryButtonP
         disabled ? styles.buttonDisabled : null,
       ]}
     >
-      <Text style={styles.label}>{label}</Text>
+      <Text style={styles.label}>{displayValue(label)}</Text>
     </Pressable>
   );
 }

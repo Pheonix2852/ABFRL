@@ -1,6 +1,7 @@
 import { StyleSheet, Text, View } from "react-native";
 
 import { RetryButton } from "@/components/ui/RetryButton";
+import { displayValue } from "@/utils/displayValue";
 
 type ErrorBannerProps = {
   message: string;
@@ -11,7 +12,7 @@ export function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Something went wrong</Text>
-      <Text style={styles.message}>{message}</Text>
+      <Text style={styles.message}>{displayValue(message)}</Text>
       {onRetry ? <RetryButton onPress={onRetry} /> : null}
     </View>
   );
