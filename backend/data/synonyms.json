@@ -2,6 +2,12 @@
   "black": ["classic black", "jet black", "midnight black"],
   "blue": ["navy", "royal blue", "sky blue"],
   "red": ["maroon", "wine", "crimson", "coral", "burgundy", "rust"],
+  "white": ["ivory", "cream", "off white", "off-white"],
+  "green": ["olive", "mint", "emerald", "sage"],
+  "pink": ["blush", "rose", "dusty rose"],
+  "yellow": ["mustard", "golden", "gold"],
+  "purple": ["plum", "lavender", "violet"],
+  "brown": ["tan", "beige", "camel"],
   "cheap": ["budget", "affordable", "low price"],
   "premium": ["luxury", "high-end"]
 }

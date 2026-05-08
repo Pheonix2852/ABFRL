@@ -237,6 +237,7 @@ def _generate_why_for_you(
             f"Budget: {entities.get('budget_max', 'flexible')}\n\n"
             f"Write exactly ONE short sentence (max 20 words) explaining why "
             f"this product is perfect for {user_name or 'this customer'}. "
+            f"Use ONLY provided product attributes. Do NOT invent missing details. "
             f"Be specific about the product features. Do not start with 'This'."
         )
 

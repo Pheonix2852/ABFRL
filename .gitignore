@@ -25,6 +25,7 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+tests
 
 # macOS
 .DS_Store
@@ -39,6 +40,7 @@ yarn-error.*
 
 app-example
 CHECKPOINT.md
+Fix.md
 
 # generated native folders
 /ios

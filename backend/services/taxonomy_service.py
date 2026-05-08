@@ -1,89 +1,98 @@
 from __future__ import annotations
 
+import json
+import re
+from collections import Counter, defaultdict
 from collections.abc import Iterable
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
-CANONICAL_CATEGORIES = {
-    "ethnic_wear",
-    "western_wear",
-    "footwear",
-    "accessories",
-}
+from rapidfuzz import fuzz, process
 
-_FAMILY_ALIASES = {
-    "shirt": {"shirt", "shirts", "formal shirt", "casual shirt"},
-    "tshirt": {"tshirt", "t-shirt", "tee", "tees"},
-    "polo": {"polo", "polo shirt"},
-    "blazer": {"blazer", "blazers", "jacket", "jackets"},
-    "top": {"top", "tops"},
-    "dress": {"dress", "dresses", "gown", "one piece", "midi"},
-    "jeans": {"jean", "jeans", "denim"},
-    "pants": {"pant", "pants", "trouser", "trousers", "slacks", "bottoms"},
-    "trousers": {"trouser", "trousers"},
-    "kurta": {"kurta", "kurtas", "kurti", "kurti"},
-    "saree": {"saree", "sarees", "sari"},
-    "sneakers": {"sneaker", "sneakers"},
-    "heels": {"heel", "heels"},
-    "sandals": {"sandal", "sandals"},
-    "loafers": {"loafer", "loafers"},
-    "watch": {"watch", "watches"},
-    "bag": {"bag", "bags", "handbag", "handbags", "backpack", "backpacks"},
-    "belt": {"belt", "belts"},
-    "wallet": {"wallet", "wallets"},
-    "footwear_general": {"shoe", "shoes", "footwear"},
-}
 
-_FAMILY_TO_CATEGORY = {
-    "shirt": "western_wear",
-    "tshirt": "western_wear",
-    "polo": "western_wear",
-    "blazer": "western_wear",
-    "top": "western_wear",
-    "dress": "western_wear",
-    "jeans": "western_wear",
-    "pants": "western_wear",
-    "trousers": "western_wear",
-    "kurta": "ethnic_wear",
-    "saree": "ethnic_wear",
-    "sneakers": "footwear",
-    "heels": "footwear",
-    "sandals": "footwear",
-    "loafers": "footwear",
-    "footwear_general": "footwear",
-    "watch": "accessories",
-    "bag": "accessories",
-    "belt": "accessories",
-    "wallet": "accessories",
-}
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_TAXONOMY_PATH = _DATA_DIR / "taxonomy.json"
+_SYNONYMS_PATH = _DATA_DIR / "synonyms.json"
+_PRODUCTS_PATH = _DATA_DIR / "products.json"
 
-COLOR_MAP = {
-    "red": ["red", "maroon", "crimson", "burgundy", "wine", "scarlet", "ruby", "coral"],
-    "blue": ["blue", "navy", "royal blue", "sky blue", "teal"],
-    "black": ["black", "jet black", "midnight black", "charcoal"],
-    "white": ["white", "off-white", "ivory", "cream"],
-    "green": ["green", "olive", "mint", "emerald"],
-    "pink": ["pink", "blush pink", "rose"],
-    "yellow": ["yellow", "mustard", "golden"],
-    "purple": ["purple", "plum", "lavender", "violet"],
-    "brown": ["brown", "tan", "beige", "camel"]
-}
+CANONICAL_CATEGORIES = {"ethnic_wear", "western_wear", "footwear", "accessories"}
 
-def normalize_color(color: str):
-    if not color:
-        return None
 
-    c = color.strip().lower()
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+            return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
-    for canonical, variants in COLOR_MAP.items():
-        if c == canonical or c in variants:
-            return canonical
 
-    return c
+@lru_cache(maxsize=1)
+def load_taxonomy() -> dict[str, list[str]]:
+    raw = _load_json(_TAXONOMY_PATH)
+    return {
+        str(canonical).strip().lower(): [str(alias).strip().lower() for alias in aliases or [] if str(alias).strip()]
+        for canonical, aliases in raw.items()
+        if str(canonical).strip()
+    }
+
+
+@lru_cache(maxsize=1)
+def load_synonyms() -> dict[str, list[str]]:
+    raw = _load_json(_SYNONYMS_PATH)
+    return {
+        str(canonical).strip().lower(): [str(alias).strip().lower() for alias in aliases or [] if str(alias).strip()]
+        for canonical, aliases in raw.items()
+        if str(canonical).strip()
+    }
+
+
+@lru_cache(maxsize=1)
+def _family_alias_index() -> dict[str, str]:
+    index: dict[str, str] = {}
+    for canonical, aliases in load_taxonomy().items():
+        index[canonical] = canonical
+        for alias in aliases:
+            index[alias] = canonical
+    return index
+
+
+@lru_cache(maxsize=1)
+def _family_terms() -> list[str]:
+    return sorted(_family_alias_index().keys(), key=len, reverse=True)
+
+
+@lru_cache(maxsize=1)
+def _color_alias_index() -> dict[str, str]:
+    index: dict[str, str] = {}
+    for canonical, aliases in load_synonyms().items():
+        index[canonical] = canonical
+        for alias in aliases:
+            index[alias] = canonical
+    return index
+
+
+@lru_cache(maxsize=1)
+def _known_color_terms() -> list[str]:
+    return sorted(_color_alias_index().keys(), key=len, reverse=True)
+
 
 def _normalize_text(value: str | None) -> str | None:
     if value is None:
         return None
     text = str(value).strip().lower()
     return text or None
+
+
+def _best_fuzzy_match(text: str, choices: Iterable[str], score_cutoff: int = 85) -> str | None:
+    choice_list = list(dict.fromkeys(choice for choice in choices if choice))
+    if not choice_list:
+        return None
+    match = process.extractOne(text, choice_list, scorer=fuzz.ratio, score_cutoff=score_cutoff)
+    if match:
+        return str(match[0])
+    return None
 
 
 def normalize_term(term: str | None) -> str | None:
@@ -94,64 +103,122 @@ def normalize_term(term: str | None) -> str | None:
     if text in CANONICAL_CATEGORIES:
         return text
 
-    for family, aliases in _FAMILY_ALIASES.items():
-        if text == family or text in aliases:
-            return family
+    exact = _family_alias_index().get(text)
+    if exact:
+        return exact
+
+    fuzzy = _best_fuzzy_match(text, _family_terms(), score_cutoff=84)
+    if fuzzy:
+        return _family_alias_index().get(fuzzy, fuzzy)
 
     return text
+
+
+def normalize_color(color: str | None) -> str | None:
+    text = _normalize_text(color)
+    if not text:
+        return None
+
+    exact = _color_alias_index().get(text)
+    if exact:
+        return exact
+
+    fuzzy = _best_fuzzy_match(text, _known_color_terms(), score_cutoff=82)
+    if fuzzy:
+        return _color_alias_index().get(fuzzy, fuzzy)
+
+    return text
+
+
+def _product_records() -> list[dict[str, Any]]:
+    raw = _load_json(_PRODUCTS_PATH)
+    if not raw:
+        return []
+    if isinstance(raw, dict):
+        return [value for value in raw.values() if isinstance(value, dict)]
+    return [item for item in raw if isinstance(item, dict)]
+
+
+@lru_cache(maxsize=1)
+def _family_category_index() -> dict[str, str]:
+    counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for product in _product_records():
+        category = _normalize_text(product.get("category"))
+        subcategory = normalize_term(product.get("subcategory"))
+        if not category or not subcategory:
+            continue
+        counts[subcategory][category] += 1
+        for alias in expand_aliases(subcategory):
+            counts[alias][category] += 1
+
+    index: dict[str, str] = {}
+    for family, counter in counts.items():
+        if counter:
+            index[family] = counter.most_common(1)[0][0]
+    return index
+
+
+def normalize_category(term: str | None) -> str | None:
+    normalized = normalize_term(term)
+    if not normalized:
+        return None
+    if normalized in CANONICAL_CATEGORIES:
+        return normalized
+    return get_category_for_family(normalized)
+
+
+def normalize_query_text(query: str | None) -> str:
+    text = _normalize_text(query)
+    if not text:
+        return ""
+
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z\-']*|\d+|[₹$]", text)
+    normalized_tokens: list[str] = []
+    known_terms = list(dict.fromkeys([*_family_terms(), *_known_color_terms()]))
+
+    for token in tokens:
+        if token.isdigit() or token in {"₹", "$"}:
+            normalized_tokens.append(token)
+            continue
+
+        mapped = normalize_term(token) or normalize_color(token)
+        if mapped:
+            normalized_tokens.append(mapped)
+            continue
+
+        fuzzy = _best_fuzzy_match(token, known_terms, score_cutoff=80)
+        if fuzzy:
+            normalized_tokens.append(_family_alias_index().get(fuzzy) or _color_alias_index().get(fuzzy) or fuzzy)
+            continue
+
+        normalized_tokens.append(token)
+
+    return " ".join(normalized_tokens)
 
 
 def expand_aliases(term: str | None) -> list[str]:
     normalized = normalize_term(term)
     if not normalized:
         return []
-
-    if normalized == "footwear_general":
-        return ["sneakers", "loafers", "sandals", "heels"]
-
-    aliases = _FAMILY_ALIASES.get(normalized)
-    if not aliases:
-        return [normalized]
-
+    aliases = load_taxonomy().get(normalized, [])
     return sorted({normalized, *aliases})
 
 
 def detect_explicit_product_noun(query: str | None) -> str | None:
-    text = _normalize_text(query)
-    if not text:
+    normalized_query = normalize_query_text(query)
+    if not normalized_query:
         return None
 
-    # Match longer aliases first for deterministic behavior.
-    candidates: list[tuple[str, str]] = []
-    for family, aliases in _FAMILY_ALIASES.items():
-        for alias in aliases:
-            candidates.append((family, alias))
-        candidates.append((family, family))
+    for canonical, aliases in load_taxonomy().items():
+        candidates = [canonical, *aliases]
+        for candidate in sorted(candidates, key=len, reverse=True):
+            if candidate and candidate in normalized_query:
+                return canonical
 
-    for family, alias in sorted(candidates, key=lambda item: len(item[1]), reverse=True):
-        if alias and alias in text:
+    for token in normalized_query.split():
+        family = _family_alias_index().get(token)
+        if family:
             return family
-
-    # Fuzzy match fallback: handle common typos (e.g., 'kuryas' -> 'kurta')
-    try:
-        from difflib import SequenceMatcher
-
-        words = [w for w in text.split() if w]
-        best_score = 0.0
-        best_family = None
-        for family, aliases in _FAMILY_ALIASES.items():
-            for alias in aliases:
-                for w in words:
-                    score = SequenceMatcher(None, w, alias).ratio()
-                    if score > best_score:
-                        best_score = score
-                        best_family = family
-
-        # Threshold tuned to allow small typos but avoid false positives
-        if best_score >= 0.7:
-            return best_family
-    except Exception:
-        pass
 
     return None
 
@@ -164,7 +231,7 @@ def get_category_for_family(family: str | None) -> str | None:
     if normalized in CANONICAL_CATEGORIES:
         return normalized
 
-    return _FAMILY_TO_CATEGORY.get(normalized)
+    return _family_category_index().get(normalized)
 
 
 def is_family_match(product_subcategory: str | None, requested_family: str | None) -> bool:

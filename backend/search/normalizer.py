@@ -3,14 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from models.search_models import SearchPlan
-from search.taxonomy import normalize_category, normalize_color
-
-
-SUBCATEGORY_SINGULAR = {
-    "shirts": "shirt",
-    "kurtas": "kurta",
-    "sarees": "saree",
-}
+from services import taxonomy_service
 
 
 def _dedupe(values: Iterable[str]) -> list[str]:
@@ -39,7 +32,10 @@ def _normalize_subcategory(value: str | None) -> str | None:
     text = _sanitize_nullable_text(value)
     if text is None:
         return None
-    return SUBCATEGORY_SINGULAR.get(text.lower(), text.lower())
+    normalized = taxonomy_service.normalize_term(text)
+    if normalized == "coordinated_look":
+        return None
+    return normalized
 
 
 def normalize_search_plan(plan: SearchPlan) -> SearchPlan:
@@ -47,16 +43,19 @@ def normalize_search_plan(plan: SearchPlan) -> SearchPlan:
     normalized = SearchPlan(**data)
 
     normalized.intent = _sanitize_nullable_text(normalized.intent) or "recommendation"
-    normalized.category = normalize_category(normalized.category)
+    normalized.category = taxonomy_service.normalize_category(normalized.category)
     if normalized.category == "apparel":
         normalized.category = None
     normalized.subcategory = _normalize_subcategory(normalized.subcategory)
     normalized.gender = _sanitize_nullable_text(normalized.gender)
     normalized.occasion = _sanitize_nullable_text(normalized.occasion)
     normalized.style = _sanitize_nullable_text(normalized.style)
+    if normalized.subcategory == "coordinated_look":
+        normalized.style_mode = "coordinated_look"
+        normalized.subcategory = None
     normalized.colors = [
         color
-        for color in (normalize_color(item) for item in normalized.colors)
+        for color in (taxonomy_service.normalize_color(item) for item in normalized.colors)
         if color
     ]
     normalized.colors = _dedupe(normalized.colors)

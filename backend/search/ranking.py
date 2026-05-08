@@ -81,7 +81,8 @@ def _color_match(product: dict[str, Any], plan: SearchPlan) -> float:
     if not plan.colors:
         return 0.5
 
-    product_colors = [str(color).lower() for color in product.get("colors") or []]
+    normalized_product_colors = product.get("normalized_colors") or []
+    product_colors = [str(color).lower() for color in normalized_product_colors or product.get("colors") or []]
     name = str(product.get("name") or "").lower()
     normalized_plan_colors = [normalize_color(color) or color.lower() for color in plan.colors]
 

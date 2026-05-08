@@ -14,32 +14,6 @@ from services import taxonomy_service
 logger = logging.getLogger(__name__)
 
 
-SUBCATEGORY_ALIAS_EXPANSION = {
-    "kurta": ["kurta"],
-    "kurtas": ["kurta"],
-    "pants": ["pants", "trousers", "jeans", "chinos", "joggers"],
-    "trousers": ["pants", "trousers", "jeans", "chinos", "joggers"],
-    "jeans": ["jeans"],
-    "denim": ["jeans"],
-    "shirts": ["shirt", "shirts", "formal_shirt", "casual_shirt"],
-    "shirt": ["shirt", "shirts", "formal_shirt", "casual_shirt"],
-    "shorts": ["shorts"],
-    "shoe": ["sneakers", "loafers", "heels", "sandals", "flats", "ethnic_footwear"],
-    "shoes": ["sneakers", "loafers", "heels", "sandals", "flats", "ethnic_footwear"],
-    "sneakers": ["sneakers", "loafers", "heels", "sandals", "flats", "ethnic_footwear"],
-    "loafers": ["sneakers", "loafers", "heels", "sandals", "flats", "ethnic_footwear"],
-    "sandals": ["sneakers", "loafers", "heels", "sandals", "flats", "ethnic_footwear"],
-    "footwear": ["sneakers", "loafers", "heels", "sandals", "flats", "ethnic_footwear"],
-    "jewellery": ["jewellery"],
-    "jewelry": ["jewellery"],
-    "bags": ["handbag", "backpack", "wallet"],
-    "bag": ["handbag", "backpack", "wallet"],
-    "saree": ["saree", "sarees"],
-    "sarees": ["saree", "sarees"],
-    "dress": ["dress", "dresses"],
-}
-
-
 def _safe_text(value: Any) -> str:
     if value is None:
         return ""
@@ -67,6 +41,14 @@ def _build_query_text(plan: SearchPlan) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
+def _normalized_product_colors(product: dict[str, Any]) -> list[str]:
+    normalized_colors = product.get("normalized_colors") or []
+    if normalized_colors:
+        return [str(color).strip().lower() for color in normalized_colors if str(color).strip()]
+    colors = product.get("colors") or []
+    return [taxonomy_service.normalize_color(color) or _safe_text(color).lower() for color in colors if _safe_text(color)]
+
+
 def _build_filter(plan: SearchPlan) -> Filter:
     must = []
 
@@ -76,10 +58,7 @@ def _build_filter(plan: SearchPlan) -> Filter:
 
     # Filter by product subcategory field (e.g., "kurta", "pants") with alias expansion
     if plan.subcategory:
-        if USE_NEW_TAXONOMY:
-            expanded = taxonomy_service.expand_aliases(plan.subcategory)
-        else:
-            expanded = SUBCATEGORY_ALIAS_EXPANSION.get(plan.subcategory.lower(), [plan.subcategory])
+        expanded = taxonomy_service.expand_aliases(plan.subcategory) if USE_NEW_TAXONOMY else [plan.subcategory]
         if expanded:
             must.append(FieldCondition(key="subcategory", match=MatchAny(any=expanded)))
         else:
@@ -97,6 +76,60 @@ def _build_filter(plan: SearchPlan) -> Filter:
     if plan.budget_min is not None:
         must.append(FieldCondition(key="price", range=Range(gte=plan.budget_min)))
     return Filter(must=must)
+
+
+def _matches_hard_constraints(product: dict[str, Any], plan: SearchPlan) -> bool:
+    if plan.category and _safe_text(product.get("category")).lower() != plan.category.lower():
+        return False
+
+    if plan.subcategory:
+        product_subcategory = _safe_text(product.get("subcategory")).lower()
+        if not taxonomy_service.is_family_match(product_subcategory, plan.subcategory):
+            return False
+
+    if plan.gender == "men":
+        genders = {str(item).lower() for item in product.get("gender_tags") or []}
+        if not genders.intersection({"men", "unisex"}):
+            return False
+    elif plan.gender == "women":
+        genders = {str(item).lower() for item in product.get("gender_tags") or []}
+        if not genders.intersection({"women", "unisex"}):
+            return False
+
+    if plan.colors:
+        wanted = {taxonomy_service.normalize_color(color) or _safe_text(color).lower() for color in plan.colors}
+        product_colors = set(_normalized_product_colors(product))
+        if not wanted.intersection(product_colors):
+            return False
+
+    return True
+
+
+def _relax_soft_constraints(plan: SearchPlan) -> list[SearchPlan]:
+    variants: list[SearchPlan] = []
+    current = SearchPlan(**(plan.model_dump() if hasattr(plan, "model_dump") else plan.dict()))
+
+    if current.occasion:
+        variant = SearchPlan(**current.model_dump()) if hasattr(current, "model_dump") else SearchPlan(**current.dict())
+        variant.occasion = None
+        variants.append(variant)
+        current = variant
+
+    if current.style:
+        variant = SearchPlan(**current.model_dump()) if hasattr(current, "model_dump") else SearchPlan(**current.dict())
+        variant.style = None
+        variants.append(variant)
+        current = variant
+
+    if (current.budget_min is not None or current.budget_max is not None) and not current.subcategory and not current.category:
+        variant = SearchPlan(**current.model_dump()) if hasattr(current, "model_dump") else SearchPlan(**current.dict())
+        if variant.budget_min is not None:
+            variant.budget_min = max(0, int(variant.budget_min * 0.8))
+        if variant.budget_max is not None:
+            variant.budget_max = int(variant.budget_max * 1.2)
+        variants.append(variant)
+
+    return variants
 
 
 def _lexical_bonus(product: dict[str, Any], plan: SearchPlan) -> float:
@@ -157,7 +190,7 @@ def _compute_retrieval_score(product: dict[str, Any], semantic_similarity: float
             + category_score * 0.40
             + subcategory_score * 0.90
         )
-        # Strongly demote unrelated product types for explicit requests.
+        # Hard gating happens before ranking; this score stays for tie-breaking only.
         if subcategory_score == 0.0:
             score -= 1.25
     else:
@@ -186,62 +219,45 @@ def retrieve_candidates(plan: SearchPlan, limit: int = 30) -> list[dict[str, Any
             top_k=max(limit * 2, 30),
             query_filter=query_filter,
         )
-        used_category_fallback = False
-
         candidates_before = len(results)
         logger.info("[search.retrieval] candidates_before_lexical=%d", candidates_before)
-        explicit_query = _is_explicit_apparel_query(plan)
 
-        if candidates_before == 0 and (plan.category or plan.subcategory):
-            logger.info(
-                "[search.retrieval] Zero exact matches (category=%s, subcategory=%s). Falling back.",
-                plan.category,
-                plan.subcategory,
-            )
-            fallback_plan = SearchPlan(
-                intent=plan.intent,
-                category=plan.category,
-                subcategory=None,
-                gender=plan.gender,
-                budget_min=plan.budget_min,
-                budget_max=plan.budget_max,
-                colors=plan.colors,
-                occasion=plan.occasion,
-                style=plan.style,
-                hard_constraints=plan.hard_constraints,
-                soft_preferences=plan.soft_preferences,
-                confidence=plan.confidence,
-            )
-            fallback_filter = _build_filter(fallback_plan)
-            fallback_query_text = _build_query_text(fallback_plan)
-            logger.info("[search.retrieval] fallback_filter=%s", fallback_filter)
-            results = vectorstore.search(
-                client,
-                embed(fallback_query_text or query_text or plan.intent or "fashion"),
-                top_k=max(limit * 2, 30),
-                query_filter=fallback_filter,
-            )
-            used_category_fallback = True
-            candidates_before = len(results)
-            logger.info("[search.retrieval] candidates_after_fallback=%d", candidates_before)
+        def _rank_results(result_set: list[Any]) -> list[dict[str, Any]]:
+            ranked_candidates: list[dict[str, Any]] = []
+            for result in result_set:
+                product = result.payload or {}
+                if not _matches_hard_constraints(product, plan):
+                    continue
+                semantic_similarity = float(result.score or 0.0)
+                lexical_bonus = _lexical_bonus(product, plan)
+                retrieval_score = _compute_retrieval_score(product, semantic_similarity, lexical_bonus, plan)
+                ranked_candidates.append(
+                    {
+                        "product": product,
+                        "semantic_similarity": semantic_similarity,
+                        "lexical_bonus": lexical_bonus,
+                        "retrieval_score": retrieval_score,
+                        "used_category_fallback": False,
+                    }
+                )
+            ranked_candidates.sort(key=lambda item: item.get("retrieval_score", 0.0), reverse=True)
+            return ranked_candidates
 
-        candidates: list[dict[str, Any]] = []
-        for result in results:
-            product = result.payload or {}
-            semantic_similarity = float(result.score or 0.0)
-            lexical_bonus = _lexical_bonus(product, plan)
-            retrieval_score = _compute_retrieval_score(product, semantic_similarity, lexical_bonus, plan)
-            candidates.append(
-                {
-                    "product": product,
-                    "semantic_similarity": semantic_similarity,
-                    "lexical_bonus": lexical_bonus,
-                    "retrieval_score": retrieval_score,
-                    "used_category_fallback": used_category_fallback,
-                }
-            )
+        candidates = _rank_results(results)
+        if not candidates:
+            for relaxed_plan in _relax_soft_constraints(plan):
+                relaxed_filter = _build_filter(relaxed_plan)
+                relaxed_query_text = _build_query_text(relaxed_plan)
+                relaxed_results = vectorstore.search(
+                    client,
+                    embed(relaxed_query_text or query_text or plan.intent or "fashion"),
+                    top_k=max(limit * 2, 30),
+                    query_filter=relaxed_filter,
+                )
+                candidates = _rank_results(relaxed_results)
+                if candidates:
+                    break
 
-        candidates.sort(key=lambda item: item.get("retrieval_score", 0.0), reverse=True)
         final_candidates = candidates[:limit]
         candidates_after = len(final_candidates)
         logger.info("[search.retrieval] candidates_after_limit=%d (limit=%d)", candidates_after, limit)
@@ -251,7 +267,7 @@ def retrieve_candidates(plan: SearchPlan, limit: int = 30) -> list[dict[str, Any
             candidates_after,
             str(query_filter),
         )
-        
+
         return final_candidates
     except Exception as exc:  # noqa: BLE001
         logger.exception("[search.retrieval] retrieval failed: %s", exc)

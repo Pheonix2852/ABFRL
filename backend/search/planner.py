@@ -11,7 +11,7 @@ from groq import Groq
 from config import ENABLE_LLM_RERANK
 from models.search_models import SearchPlan
 from search.normalizer import normalize_search_plan
-from search.taxonomy import load_synonyms, load_taxonomy, normalize_category
+from services import taxonomy_service
 
 logger = logging.getLogger(__name__)
 
@@ -82,84 +82,27 @@ def _infer_style(message: str) -> str | None:
     return None
 
 
-def _map_taxonomy_to_qdrant_category(taxonomy_category: str | None) -> str | None:
-    """
-    Map taxonomy category names (from load_taxonomy()) to Qdrant category values.
-    
-    Taxonomy has: "kurtas", "sarees", "jeans", "shirts", "dresses", "jackets", "trousers"
-    Qdrant has:   "ethnic_wear", "western_wear", "accessories", "footwear"
-    """
-    if not taxonomy_category:
-        return None
-    
-    mapping = {
-        "kurtas": "ethnic_wear",
-        "sarees": "ethnic_wear",
-        "jackets": "western_wear",
-        "shirts": "western_wear",
-        "trousers": "western_wear",
-        "jeans": "western_wear",
-        "dresses": "western_wear",
-    }
-    
-    return mapping.get(taxonomy_category.lower())
-
-
 def _extract_category(message: str) -> str | None:
-    lower = message.lower()
-    taxonomy = load_taxonomy()
-    for canonical, aliases in taxonomy.items():
-        candidates = [canonical, *aliases]
-        for candidate in sorted(candidates, key=len, reverse=True):
-            if candidate and candidate in lower:
-                # Map taxonomy category to Qdrant category
-                return _map_taxonomy_to_qdrant_category(canonical)
-    return None
+    family = taxonomy_service.detect_explicit_product_noun(message)
+    if not family or family == "coordinated_look":
+        return None
+    return taxonomy_service.get_category_for_family(family)
 
 
 def _extract_subcategory(message: str) -> str | None:
-    """
-    Extract product subcategory (kurta, pants, shirt, etc.) from user message.
-    Uses a mapping of common product types normalized by NLU rules.
-    """
-    lower = message.lower()
-    
-    # Subcategory mapping — based on NLU normalizer
-    subcategory_map = {
-        "kurta": ["kurta", "kurti", "kurtas"],
-        "pants": ["pant", "pants", "trouser", "trousers", "slacks", "bottoms"],
-        "shirt": ["shirt", "shirts", "formal shirt", "casual shirt"],
-        "jeans": ["jean", "jeans", "denim"],
-        "tshirt": ["tshirt", "tee", "t-shirt"],
-        "shorts": ["short", "shorts"],
-        "shoes": ["shoe", "shoes", "footwear", "sneaker", "sneakers", "loafer", "loafers", "heel", "heels", "sandal", "sandals"],
-        "jewellery": ["jewel", "jewellery", "jewelry", "necklace", "earring", "earrings"],
-        "bags": ["purse", "bag", "bags", "handbag"],
-        "saree": ["saree", "sarees", "sari"],
-        "dress": ["dress", "gown", "one piece", "midi"],
-    }
-    
-    # Check each subcategory and its aliases
-    for canonical, aliases in subcategory_map.items():
-        candidates = [canonical, *aliases]
-        # Sort by length descending to match longer phrases first
-        for candidate in sorted(set(candidates), key=len, reverse=True):
-            if candidate and candidate in lower:
-                return canonical
-    
-    return None
+    family = taxonomy_service.detect_explicit_product_noun(message)
+    if not family or family == "coordinated_look":
+        return None
+    return taxonomy_service.normalize_term(family)
 
 
 def _extract_colors(message: str) -> list[str]:
-    lower = message.lower()
-    synonyms = load_synonyms()
     colors: list[str] = []
-    for canonical, aliases in synonyms.items():
-        if canonical in {"cheap", "premium"}:
-            continue
-        candidates = [canonical, *aliases]
-        if any(candidate in lower for candidate in sorted(candidates, key=len, reverse=True)):
-            colors.append(canonical)
+    normalized = taxonomy_service.normalize_query_text(message)
+    for token in normalized.split():
+        color = taxonomy_service.normalize_color(token)
+        if color and color not in {"cheap", "premium"} and color not in colors:
+            colors.append(color)
     return colors
 
 
@@ -190,28 +133,45 @@ def _build_fallback_plan(message: str) -> SearchPlan:
     colors = _extract_colors(message)
     category = _extract_category(message)
     subcategory = _extract_subcategory(message)
-    hard_constraints: list[str] = []
+    style_mode = None
+    normalized_message = taxonomy_service.normalize_query_text(message)
+    if any(token in normalized_message for token in ["outfit", "outfits", "coordinated_look"]):
+        style_mode = "coordinated_look"
+
+    explicit_constraints: list[str] = []
     if category:
-        hard_constraints.append(category)
+        explicit_constraints.append(f"category:{category}")
     if subcategory:
-        hard_constraints.append(subcategory)
-    if budget_min is not None:
-        hard_constraints.append(f"budget_min:{budget_min}")
-    if budget_max is not None:
-        hard_constraints.append(f"budget_max:{budget_max}")
+        explicit_constraints.append(f"subcategory:{subcategory}")
+    if colors:
+        explicit_constraints.extend(f"color:{color}" for color in colors)
+    if _infer_gender(message):
+        explicit_constraints.append(f"gender:{_infer_gender(message)}")
+
+    inferred_preferences: list[str] = []
+    if budget_min is not None or budget_max is not None:
+        inferred_preferences.append("budget")
+    if _infer_occasion(message):
+        inferred_preferences.append(f"occasion:{_infer_occasion(message)}")
+    if _infer_style(message):
+        inferred_preferences.append(f"style:{_infer_style(message)}")
 
     plan = SearchPlan(
         intent="recommendation",
         category=category,
         subcategory=subcategory,
+        style_mode=style_mode,
         gender=_infer_gender(message),
         budget_min=budget_min,
         budget_max=budget_max,
         colors=colors,
         occasion=_infer_occasion(message),
         style=_infer_style(message),
-        hard_constraints=hard_constraints,
-        soft_preferences=["budget"] if "cheap" in message.lower() else [],
+        allow_cross_category=style_mode == "coordinated_look" or not (category or subcategory),
+        explicit_constraints=explicit_constraints,
+        inferred_preferences=inferred_preferences,
+        hard_constraints=explicit_constraints,
+        soft_preferences=inferred_preferences,
         confidence=0.35,
     )
     return normalize_search_plan(plan)
@@ -222,12 +182,16 @@ def _parse_llm_plan(payload: dict[str, Any]) -> SearchPlan:
         intent=str(_safe_nullable_text(payload.get("intent")) or "recommendation"),
         category=_safe_nullable_text(payload.get("category")),
         subcategory=_safe_nullable_text(payload.get("subcategory")),
+        style_mode=_safe_nullable_text(payload.get("style_mode")),
         gender=_safe_nullable_text(payload.get("gender")),
         budget_min=_safe_int(payload.get("budget_min")),
         budget_max=_safe_int(payload.get("budget_max")),
         colors=[str(color) for color in payload.get("colors") or [] if str(color).strip()],
         occasion=_safe_nullable_text(payload.get("occasion")),
         style=_safe_nullable_text(payload.get("style")),
+        allow_cross_category=bool(payload.get("allow_cross_category", False)),
+        explicit_constraints=[str(item) for item in payload.get("explicit_constraints") or [] if str(item).strip()],
+        inferred_preferences=[str(item) for item in payload.get("inferred_preferences") or [] if str(item).strip()],
         hard_constraints=[str(item) for item in payload.get("hard_constraints") or [] if str(item).strip()],
         soft_preferences=[str(item) for item in payload.get("soft_preferences") or [] if str(item).strip()],
         confidence=float(payload.get("confidence") or 0.6),
@@ -244,8 +208,9 @@ def _try_llm_plan(message: str, context: dict | None = None) -> SearchPlan | Non
     prompt = (
         "Convert retail query into JSON only.\n"
         "Use apparel taxonomy.\n"
+        "Use ONLY taxonomy-driven family and color terms.\n"
         "Infer category, subcategory, budget, color, occasion.\n"
-        "Return keys: intent, category, subcategory, gender, budget_min, budget_max, colors, occasion, style, hard_constraints, soft_preferences, confidence.\n"
+        "Return keys: intent, category, subcategory, style_mode, gender, budget_min, budget_max, colors, occasion, style, allow_cross_category, explicit_constraints, inferred_preferences, hard_constraints, soft_preferences, confidence.\n"
         f"Context: {context_text}\n"
         f"Query: {message}"
     )
@@ -279,36 +244,58 @@ def build_search_plan(message: str, context: dict | None = None) -> SearchPlan:
         if ENABLE_LLM_RERANK:
             logger.info("[search.planner] LLM rerank flag enabled for future use")
 
-        plan = _try_llm_plan(message, context)
+        normalized_message = taxonomy_service.normalize_query_text(message)
+        plan = _try_llm_plan(normalized_message, context)
         if plan is None:
-            plan = _build_fallback_plan(message)
+            plan = _build_fallback_plan(normalized_message)
 
-        # Safeguard: keep explicit apparel type queries strict even if LLM misses subcategory.
-        if not plan.subcategory:
-            plan.subcategory = _extract_subcategory(message)
+        explicit_family = taxonomy_service.detect_explicit_product_noun(normalized_message)
+        if explicit_family == "coordinated_look":
+            plan.style_mode = "coordinated_look"
+            plan.allow_cross_category = True
+        elif explicit_family:
+            if not plan.subcategory:
+                plan.subcategory = taxonomy_service.normalize_term(explicit_family)
+            if not plan.category:
+                inferred_category = taxonomy_service.get_category_for_family(explicit_family)
+                if inferred_category:
+                    plan.category = inferred_category
 
-        if context:
-            context_plan = context.get("search_plan") or context.get("plan")
-            if isinstance(context_plan, dict):
-                context_candidate = SearchPlan(**context_plan)
-                if not plan.category:
-                    plan.category = normalize_category(context_candidate.category)
-                if not plan.subcategory:
-                    plan.subcategory = context_candidate.subcategory
-                if not plan.colors:
-                    plan.colors = context_candidate.colors
-                if not plan.occasion:
-                    plan.occasion = context_candidate.occasion
-                if not plan.style:
-                    plan.style = context_candidate.style
-                if plan.budget_min is None:
-                    plan.budget_min = context_candidate.budget_min
-                if plan.budget_max is None:
-                    plan.budget_max = context_candidate.budget_max
-                if not plan.gender:
-                    plan.gender = context_candidate.gender
+        if not plan.category and plan.subcategory:
+            inferred_category = taxonomy_service.get_category_for_family(plan.subcategory)
+            if inferred_category:
+                plan.category = inferred_category
+
+        if not plan.allow_cross_category:
+            exploratory_tokens = ["something nice", "fashion ideas", "suggest outfits", "outfit ideas", "recommend something", "anything nice"]
+            plan.allow_cross_category = any(token in normalized_message for token in exploratory_tokens)
+
+        if plan.style_mode == "coordinated_look":
+            plan.allow_cross_category = True
+
+        explicit_constraints: list[str] = []
+        if plan.category:
+            explicit_constraints.append(f"category:{plan.category}")
+        if plan.subcategory:
+            explicit_constraints.append(f"subcategory:{plan.subcategory}")
+        if plan.gender:
+            explicit_constraints.append(f"gender:{plan.gender}")
+        explicit_constraints.extend(f"color:{color}" for color in plan.colors)
+
+        inferred_preferences: list[str] = []
+        if plan.occasion:
+            inferred_preferences.append(f"occasion:{plan.occasion}")
+        if plan.style:
+            inferred_preferences.append(f"style:{plan.style}")
+        if plan.budget_min is not None or plan.budget_max is not None:
+            inferred_preferences.append("budget")
+
+        plan.explicit_constraints = list(dict.fromkeys(explicit_constraints))
+        plan.inferred_preferences = list(dict.fromkeys(inferred_preferences))
+        plan.hard_constraints = list(plan.explicit_constraints)
+        plan.soft_preferences = list(dict.fromkeys([*plan.soft_preferences, *plan.inferred_preferences]))
 
         return normalize_search_plan(plan)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[search.planner] Falling back after failure: %s", exc)
-        return _build_fallback_plan(message)
+        return _build_fallback_plan(taxonomy_service.normalize_query_text(message))
